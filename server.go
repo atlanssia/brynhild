@@ -13,6 +13,7 @@ type server struct {
 	conf *Conf
 	relay []string
 	tlsConfig *tls.Config
+	sessionCount uint
 }
 
 const (
@@ -21,14 +22,24 @@ const (
 
 	// format MaxMessageSize
 	messageSize string = "250-SIZE %d\r\n"
-	advStartTLS string = "250-STARTTLS"
+	advStartTLS string = "250-STARTTLS\r\n"
 	pipelining string = "250-PIPELINING\r\n"
 	advEnhancedStatusCodes string = "250-ENHANCEDSTATUSCODES\r\n"
 )
 
 // new server instance
 func NewServer(conf *Conf) (*server, error) {
-	return &server{conf, nil, nil}, nil
+	cert, err := tls.LoadX509KeyPair(conf.PublicKeyFile, conf.PrivateKeyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ServerName:   conf.Hostname,
+	}
+	return &server{conf, nil, tlsConfig, 0}, nil
 }
 
 // start a server
@@ -49,6 +60,8 @@ func (s *server) Start() error {
 	for {
 		conn, err := listener.Accept()
 		sessionId++
+		s.sessionCount++ // count active sessions
+
 		if err != nil {
 			log.Error(err)
 			continue
@@ -69,11 +82,16 @@ func (s *server) Shutdown() error {
 func (s *server) handleSession(conn net.Conn, sessionId uint64) {
 	defer conn.Close()
 
+	session := newSession(conn, sessionId)
+	defer session.Close()
+
 	// the welcoming message
 	greeting := fmt.Sprintf(welcomeMsg, s.conf.Welcoming, sessionId, time.Now().Format(time.RFC3339))
-	helo := fmt.Sprintf("250 %s Hello", s.conf.Hostname)
-	ehlo := fmt.Sprintf("250-%s Hello\r\n", s.conf.Hostname)
+	helo := fmt.Sprintf("250 %s", s.conf.Hostname)
+	ehlo := fmt.Sprintf("250-%s\r\n", s.conf.Hostname)
 	maxMsgSize := fmt.Sprintf(messageSize, s.conf.MaxMessageSize)
+
+	session.reply(greeting)
 }
 
 func (s *server) configTLS() error {
