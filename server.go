@@ -1,34 +1,32 @@
 package brynhild
 
 import (
+	"brynhild/internal/conf"
 	"crypto/tls"
-	"net/smtp"
-	"net"
-	log "github.com/Sirupsen/logrus"
 	"fmt"
+	log "github.com/Sirupsen/logrus"
+	"net"
+	"net/smtp"
 	"time"
 )
 
 type server struct {
-	conf *Conf
-	relay []string
-	tlsConfig *tls.Config
+	option       *conf.Option
+	relay        []string
+	tlsConfig    *tls.Config
 	sessionCount uint
 }
 
 const (
-	// format greeting msg and sessionId , time.Now()
-	welcomeMsg string = "220 %s SessionId:%d Time:%s"
-
 	// format MaxMessageSize
-	messageSize string = "250-SIZE %d\r\n"
-	advStartTLS string = "250-STARTTLS\r\n"
-	pipelining string = "250-PIPELINING\r\n"
+	messageSize            string = "250-SIZE %d\r\n"
+	advStartTLS            string = "250-STARTTLS\r\n"
+	pipelining             string = "250-PIPELINING\r\n"
 	advEnhancedStatusCodes string = "250-ENHANCEDSTATUSCODES\r\n"
 )
 
 // new server instance
-func NewServer(conf *Conf) (*server, error) {
+func NewServer(conf *conf.Option) (*server, error) {
 	cert, err := tls.LoadX509KeyPair(conf.PublicKeyFile, conf.PrivateKeyFile)
 	if err != nil {
 		return nil, err
@@ -44,7 +42,7 @@ func NewServer(conf *Conf) (*server, error) {
 
 // start a server
 func (s *server) Start() error {
-	listener, err := net.Listen("tcp", s.conf.ListenInterface)
+	listener, err := net.Listen("tcp", s.option.ListenInterface)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -63,8 +61,12 @@ func (s *server) Start() error {
 		s.sessionCount++ // count active sessions
 
 		if err != nil {
-			log.Error(err)
-			continue
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				time.Sleep(time.Second)
+				log.Error(err, "- will continue")
+				continue
+			}
+			return err
 		}
 
 		// handle a connection
@@ -78,24 +80,18 @@ func (s *server) Shutdown() error {
 	return nil
 }
 
-// handle a connection
+// handle a connection (in new goroutine)
 func (s *server) handleSession(conn net.Conn, sessionId uint64) {
 	defer conn.Close()
 
 	session := newSession(conn, sessionId)
-	defer session.Close()
+	defer session.close()
 
-	// the welcoming message
-	greeting := fmt.Sprintf(welcomeMsg, s.conf.Welcoming, sessionId, time.Now().Format(time.RFC3339))
-	helo := fmt.Sprintf("250 %s", s.conf.Hostname)
-	ehlo := fmt.Sprintf("250-%s\r\n", s.conf.Hostname)
-	maxMsgSize := fmt.Sprintf(messageSize, s.conf.MaxMessageSize)
-
-	session.reply(greeting)
+	session.handle()
 }
 
 func (s *server) configTLS() error {
-	cert, err := tls.LoadX509KeyPair(s.conf.PublicKeyFile, s.conf.PrivateKeyFile)
+	cert, err := tls.LoadX509KeyPair(s.option.PublicKeyFile, s.option.PrivateKeyFile)
 	if err != nil {
 		return err
 	}
@@ -103,7 +99,7 @@ func (s *server) configTLS() error {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.VerifyClientCertIfGiven,
-		ServerName:   s.conf.Hostname,
+		ServerName:   s.option.Hostname,
 	}
 
 	s.tlsConfig = tlsConfig
@@ -116,7 +112,7 @@ func (s *server) sendMail(addr string, from string, to []string, msg []byte) err
 		return err
 	}
 	defer c.Close()
-	if err = c.Hello("xxxxxxxxxx.com"); err != nil {
+	if err = c.Hello(s.option.Hostname); err != nil {
 		return err
 	}
 	if ok, _ := c.Extension("STARTTLS"); ok {
